@@ -1,32 +1,46 @@
-function [EEG, fig] = face_off(EEGmain, tabledata)
+function [EEG_clean, fig, rejTrials, statsinfo] = face_off(EEGmain, tabledata, flag_save, flag_alignment)
 
 %% Load data
 % [FileName,PathName] = uigetfile({'*.set' 'EEGLAB (.set)'; '*.bdf' 'Biosig (.bdf)';'*.xdf' 'LSL (.xdf)'},'Select file');
 % EEG = pop_loadxdf('/Users/pragathi/NEATlab/Data/PilotData/Pilot2/Pilot2 BrainE.xdf'); %fullfile(PathName,FileName));
 % EEGmain = pop_loadxdf(fullfile(PathName,FileName));
 
-%% Parameters
-baseline = [-1000 0];
-latencies = 100:100:500;
+taskname = 'FaceOff';
 
-%beh analysis
-%collect the conditions required
-trialset = behavior_events(tabledata);
+%% Parameters
+statsinfo = [];
 
 targetChmain(1).targetCh = {'FCz'};
 
-%% Epoching
-timelim = [-1 2];
-%epoching and removing baseline in the time period mentioned
-[EEGmain,rejTrials] = epoching(EEGmain, timelim);
-EEGmain = pop_rmbase( EEGmain, baseline);
+timelim = [-.5 2];% for epoching, based on the time locking event
+
+baseline = [-500 0];
+latencies = 100:100:500;
+
+%filtering
+srate = 250;
+cutoffFreq = [1 55];
+
+%source estimation, network analysis- bsbl, peb plus
+windowSize = 25;
+overlaping = 25;
+solverType = 'bsbl';
+saveFull = true;
+account4artifacts = true;
+
+%plotting
+
+figiter = 0;
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% keyboard
 
 %% Preliminary Filtering
-srate = 250;
-cutoffFreq = [1 45];
 EEGmain.data = double(EEGmain.data);
 EEGmain = pop_resample( EEGmain, srate);
 EEGmain = pop_eegfiltnew(EEGmain, cutoffFreq(1), cutoffFreq(2), 826,0,[],0);
+% EEGmain = pop_eegfiltnew(EEGmain, cutoffFreq(1), [], 826,0,[],0);
+
 EEGmain = pop_reref( EEGmain, []);
 ind = find(ismember({EEGmain.chanlocs.labels},'TIMESTAMP'));
 if ~isempty(ind)
@@ -56,126 +70,151 @@ EEGmain = pop_forwardModel(EEGmain,template);
 hmfile = EEGmain.etc.src.hmfile;
 hm = headModel.loadFromFile(hmfile);
 
+%% Epoching
+%epoching and removing baseline in the time period mentioned
+[EEGmain,rejTrials,EpochTrials] = epoching(EEGmain, timelim, flag_alignment.num, taskname);
+EEGmain = pop_rmbase( EEGmain, baseline);
+
 
 %% Source estimation and artifact rejection
-windowSize = 25;
-overlaping = 25;
-solverType = 'bsbl';
-saveFull = true;
-account4artifacts = true;
 %clean EEG
 EEG_clean = pop_inverseSolution(EEGmain, windowSize, overlaping, solverType, saveFull, account4artifacts);
 
-%Neural activity in the source space
-EEG_src = moveSource2DataField(EEG_clean);
-
-% plotting the cleaned EEG in the headmodel gui
-% eegplot(EEG.data,'srate',EEG.srate,'data2',EEG_clean.data);
-% pop_eegbrowserx(EEG_clean);
-% EEG_clean.etc.src
-
-% connectivity analysis
-% The ksdensity function will tell about the shared information between two
-% ROI / EEG related activity
-% figure;ksdensity(EEG_clean.etc.src.act([1 2],:,1));
-% pop_eegplot(EEG_src)
-% vis.DesignROIs
-
-%Nw indices of interest
-%Cingulo opercular network
-% hm.indices4Structure(hm.atlas.label)
-%mask for the network 
-nwind_full = sum(hm.indices4Structure([{'G_and_S_cingul-Ant L'    }
-    {'G_and_S_cingul-Ant R'    }
-    {'G_and_S_cingul-Mid-Ant L'}
-    {'G_front_inf-Opercular R' }
-    {'G_front_inf-Orbital R'   }
-    {'G_front_inf-Triangul R'  }
-    {'G_insular_short R'       }
-    {'S_pericallosal L'        }]),2);
-
-%Need to convert to smaller atlas indices
-%nwind{1} = nwind_full;
-
-%  cla(obj.gui.ax);
-%  hm.plotMontage(false, obj.gui.ax);
-
-figiter = 0;
+nw = load('Networks_BrainE.mat','network'); % obtain network variable involving a mask for different networks
+funcnetwork = nw.network;
 
 %sanity check to see if the beh data and the EEG trials balance
-sanitycheck = setdiff(1:max(trialset(end).ind),[1:max([size(EEGclean.data,3),rejTrials])]);
+%The program is in such a way that the order of trials are maintained the
+%same between the beh file and the EEG matrix
 
-%finding the index of the EEG epoch from the main index
-eegepochind = setdiff([1:max([size(EEGclean.data,3),rejTrials])],rejTrials);
+%beh analysis
+%collect the conditions required
+trialset = behavior_events(tabledata, rejTrials, EpochTrials);
+
+%trialset's end structure has all the trials in it, that belongs to a
+%particular task
+sanitycheck = setdiff(1:max(trialset(end).ind),[1:size(EEG_clean.data,3)]);
+
+%             keyboard
 
 %%
 if isempty(sanitycheck)
-for iter = 1:length(trialset)
-    %Just focusing on a particular condition?
-    EEG = EEG_clean; %duplicating the main EEG matrix- cleaned
-    EEGs = EEG_src; %duplicating the source matrix
-    
-    condition = trialset(iter).condition;
-    
-    %finding the indices of the eegepoch that belongs to a condition
-    [~,trialsetind] = intersect(eegepochind,trialset(iter).ind);
-    
-    
-    if ~isempty(trialsetind)
-        %epoching based on a condition
-        EEG.data = EEG.data(:,:,trialsetind); %clean data
-        EEGs.data = EEGs.data(:,:,trialsetind); %source data
+    for iter = 1:length(trialset)
+        %Just focusing on a particular condition?
+        EEG = EEG_clean; %duplicating the main EEG matrix- cleaned
         
-        %% Figures
+        condition = trialset(iter).condition;
         
-        for chiter = 1:length(targetChmain)
+        %finding the indices of the eegepoch that belongs to a condition
+        trialsetind = trialset(iter).ind;
+        
+        
+        if ~isempty(trialsetind)
+            %epoching based on a condition
+            EEG.data = EEG.data(:,:,trialsetind); %clean data
+            EEG.trials = length(trialsetind);
+            EEG.event = [];%macell2matke sure the structure is not used, since the trial information is modified
+            EEG.urevent = [];%make sure the structure is not used, since the trial information is modified
+            EEG.epoch = [];
+            %% Figures
             
-            targetCh = targetChmain(chiter).targetCh;
+            for chiter = 1:length(targetChmain)
+                
+                targetCh = targetChmain(chiter).targetCh;
+                %%
+                try
+                    figiter = figiter + 1;
+                    %Trial Stats
+                    fig(figiter) = trialStats(EEG, condition, targetCh, flag_alignment.name, taskname);
+                    tempdata = get(fig(figiter),'UserData');
+                    tempdata = cell2mat(tempdata);
+                    tempdata(tempdata==' ') = '_';
+                    if flag_save == 1, saveas(fig(figiter),[(tempdata)],'png'); end
+                end
+                %%
+                try
+                    figiter = figiter + 1;
+                    %ERP image
+                    fig(figiter) = singleTrialAnalysis(EEG, taskname, condition, targetCh, flag_alignment.name);
+                    tempdata = get(fig(figiter),'UserData');
+                    tempdata(tempdata==' ') = '_';
+                    if flag_save == 1, saveas(fig(figiter),[(tempdata)],'png'); end
+                end
+                
+                %% ERSP image
+                try
+                    figiter = figiter + 1;
+                    [ERSP, EEGtimes, freq] = ersp(EEG, targetCh,baseline);
+                    fig(figiter) = erspImagePlot(ERSP, targetCh, EEGtimes, freq, taskname, condition, flag_alignment.name);
+                    tempdata = get(fig(figiter),'UserData');
+                    tempdata(tempdata==' ') = '_';
+                    if flag_save == 1, saveas(fig(figiter),[(tempdata)],'png'); end
+                end
+            end
             
+            %% TopoPlot
+            try
+                figiter = figiter + 1;
+                fig(figiter) = braineTopoplot(EEG, taskname, condition, flag_alignment.name, latencies, EEG.chanlocs, EEGtimes);
+                tempdata = get(fig(figiter),'UserData');
+                tempdata(tempdata==' ') = '_';
+                if flag_save == 1, saveas(fig(figiter),[(tempdata)],'png'); end
+            end
+            %%  Source Localisation analysis, general
+            %             Peaklatency = findPeaksLatency(EEG.data, EEG.times, baseline);
+            %             For consistency across data sets
+            Peaklatency = [25 50 100 150 200 250 300 350 400 450 500];
+            
+            %% --Evidence against similarity to optimal cortical source, (For every network)
+%             
             figiter = figiter + 1;
-            %Trial Stats
-            fig(figiter) = trialStats(EEG, condition, targetCh);
+            [fig(figiter), Bf] = computeNwEvidence(EEGmain, EEG, hm, funcnetwork, trialsetind, Peaklatency, taskname, condition, flag_alignment.name);
+            tempdata = get(fig(figiter),'UserData');
+            tempdata(tempdata==' ') = '_';
+            if flag_save == 1, saveas(fig(figiter),[(tempdata)],'png'); end
             
-            figiter = figiter + 1;
-            %ERP image
-            fig(figiter) = singleTrialAnalysis(EEG, targetCh);
             
-            %ERSP image
-            figiter = figiter + 1;
-            [ERSP, times, freq] = ersp(EEG, targetCh,baseline);
-            fig(figiter) = erspImage(ERSP, condition, times, freq, targetCh);
+            %% Pick the top network and perform ERSP for each of its ROI, also do the wavelet based coherence, and phase computation
+            EEG.etc.src.act = EEG.etc.src.act(:,:,trialsetind);
+            EEG_src = moveSource2DataField(EEG);
+            [~, sortnet] = sort(min(Bf,[],2),'ascend');
+            %pick the first network
+            net = sortnet(1);
+            indNet = find(ismember(hm.atlas.label,funcnetwork(net).ROI));
+            indNet_cmpr = find(ismember(hm.atlas.label,{'G_postcentral R'        }));
+            for chi = 1:length(indNet)
+                try
+                    figiter = figiter + 1;
+                    targetChs = {EEG_src.chanlocs(indNet(chi)).labels};
+                    [ERSP, EEGtimes, freq] = ersp(EEG_src, targetChs,baseline);
+                    fig(figiter) = erspImageROI(ERSP, hm, targetChs, EEGtimes, freq, taskname, condition, flag_alignment.name);
+                    tempdata = get(fig(figiter),'UserData');
+                    tempdata(tempdata==' ') = '_';
+                    if flag_save == 1, saveas(fig(figiter),[(tempdata)],'png'); end
+                
+                    %Obtaining phase information with respect to the
+                    %{'G_postcentral R'        }-- arbitrarily chosen
+                    figiter = figiter + 1;
+                    fig(figiter) = wcoherenceROI(EEG_src, hm, indNet(chi), indNet_cmpr, taskname, condition, flag_alignment.name);
+                    tempdata = get(fig(figiter),'UserData');
+                    tempdata = cell2mat(tempdata);
+                    tempdata(tempdata==' ') = '_';
+                    if flag_save == 1, saveas(fig(figiter),[(tempdata)],'png'); end
+                    
+                end
+            end
             
         end
-        
-        %TopoPlot
-        figiter = figiter + 1;
-        fig(figiter) = braineTopoplot(EEG, condition, latencies, EEG.chanlocs, EEG.times);
-        
-        %Source Localisation analysis, general
-         Peaklatency = findPeaksLatency(EEG.data, EEG.times, baseline);
-      
-         %Specifically for 20 different networks
-
-         for nwindi = 1:length(nwindset)
-
-                 nwind = nwindset{nwindi};
-
-
-        figiter = figiter + 1;
-        fig(figiter) = erpSourceAnalysis(EEG, hmfile, condition, Peaklatency, EEG.times, nwind);
-        
-        %A topoplot
-        figiter = figiter + 1;
-        fig(figiter) = braineTopoplot(EEGs.data(nwind,:,:), condition, latencies, EEGs.chanlocs, EEG.times);
-         end
     end
 end
-end
 
 end
 
 
-function [EEG,rejTrials] = epoching(EEG, timelim)
+function [EEG,rejTrials,EpochTrials] = epoching(EEG, timelim, flag_alignment, taskname)
+%flag_alignment: 1) trial onset based, 2) stimulus onset based, 3) response
+%based, 4) feedback based
+
 eventType = {EEG.event.type};
 eventLatency = cell2mat({EEG.event.latency});
 
@@ -183,6 +222,7 @@ eventLatency = cell2mat({EEG.event.latency});
 indz = ismember(eventType,{'0','99'});
 eventType(indz) = [];
 eventLatency(indz) = [];
+
 for k=1:length(eventType)
     eventType{k} = str2double(eventType{k});
 end
@@ -191,6 +231,8 @@ indnan = isnan(eventType);
 eventType(indnan) = [];
 eventLatency(indnan) = [];
 
+%%%%%%%%%%first obtain all the trials, with respect to the trial onset
+
 face_off_events = strfind(eventType, 10);
 startEvent = find(ismember(eventType,4000));
 if isempty(startEvent)
@@ -198,10 +240,57 @@ if isempty(startEvent)
     startEvent(1) = [];
 end
 endEvent   = find(ismember(eventType,401));
+
 face_off_events = face_off_events(face_off_events > startEvent(1) & face_off_events < endEvent(end));
 
-latency = {eventLatency(face_off_events)};
-eventType = {'face_off'};
+%Now adjust the start time based on the alignment needed
+if flag_alignment == 1 %trial onset
+    
+    EpochTrials = ~isnan(face_off_events);
+    
+    latency = {eventLatency(face_off_events)};
+    eventType = {[taskname]};
+    
+elseif flag_alignment == 2 %stim onset
+    
+    %finding the position of the target events
+    Targetevents = [1:8, 21:24]; %could be 21:24 to mention the direction of arrows and the top / bottom location
+    
+    [new_face_off_events,EpochTrials] = compute_events(face_off_events, eventType, Targetevents);
+    
+    new_face_off_events = new_face_off_events(EpochTrials);
+    
+    latency = {eventLatency(new_face_off_events)};
+    
+    eventType = {[taskname '_stim']};
+    
+elseif flag_alignment == 3 %resp onset
+    
+    %finding the position of the target events
+    Targetevents = [11 12 13];
+    
+    [new_face_off_events,EpochTrials] = compute_events(face_off_events, eventType, Targetevents);
+    
+    new_face_off_events = new_face_off_events(EpochTrials);
+    
+    latency = {eventLatency(new_face_off_events)};
+    
+    eventType = {[taskname '_resp']};
+    
+elseif flag_alignment == 4 %feedback onset
+    
+    %finding the position of the target events
+    Targetevents = [14, 15];
+    
+    [new_face_off_events,EpochTrials] = compute_events(face_off_events, eventType, Targetevents);
+    
+    new_face_off_events = new_face_off_events(EpochTrials);
+    
+    latency = {eventLatency(new_face_off_events)};
+    
+    eventType = {[taskname '_fdbk']};
+    
+end
 
 EEG = eeg_addnewevents(EEG,latency, eventType);
 EEG = pop_epoch( EEG, eventType, timelim, 'epochinfo', 'yes');
@@ -209,303 +298,104 @@ EEG = pop_epoch( EEG, eventType, timelim, 'epochinfo', 'yes');
 end
 
 
-function fig = braineTopoplot(EEG, condition, latencies, chanlocs, times)
-latencies(latencies<min(times)) = min(times);
-latencies(latencies>max(times)) = max(times);
 
-% Topoplots
-n = length(latencies);
-mx = prctile(abs(EEG(:)),97.5);
-indLatency = interp1(times,1:length(times), latencies,'nearest');
-fig = figure('Tag','GoGreen','UserData',['Topoplot ' condition '.']);
-for i=1:n
-    ax = subplot(1,n,i);
-    topoplot(EEG(:,indLatency(i)),chanlocs);
-    axis(ax,'equal','tight','on');
-    set(ax,'CLim',[-mx mx],'YTickLabel',[],'XTickLabel',[],'XColor',[1 1 1],'YColor',[1 1 1]);
-    xlabel(ax,[num2str(latencies(i)) ' ms']);
-end
-colorbar('Position',[0.9331    0.6224    0.0130    0.2312]);
-colormap(bipolar(256,0.85));
-end
-
-function fig = singleTrialAnalysis(EEG, targetCh)
-targetCh = cell2mat(targetCh);
-fig = figure('Tag','GoGreen','UserData',['Single trial analysis channel '  targetCh '.']);
-indCh = find(ismember(lower({EEG.chanlocs.labels}),lower(targetCh)));
-pop_erpimage(EEG,1, indCh,[], targetCh, 5, 1,{},[],'' ,'yerplabel','\muV','erp','on','cbar','on','topo', { indCh EEG.chanlocs EEG.chaninfo } );
-end
-
-function [ERSP, times, freq, ERSP_alltrials] = ersp(EEG, targetCh,baseline)
-baseline = EEG.times>baseline(1) & EEG.times<=baseline(2);
-times = EEG.times;
-indrm = EEG.times<EEG.times(1)*0.9 | EEG.times>EEG.times(end)*0.9;
-times(indrm) = [];
-baseline(indrm) = [];
-ind = ismember({EEG.chanlocs.labels},targetCh);
-data = double(squeeze(EEG.data(ind,:,:)));
-for t=1:EEG.trials
-    [wt,freq] = cwt(data(:,t), 'amor', EEG.srate);
-    if t==1
-        Pxx = zeros([length(freq) length(times) EEG.trials]);
-        ERSP = zeros([length(freq) length(times)]);
-        [~,sorting] = sort(freq);
-    end
-    Pxx(:,:,t) = abs(wt(sorting,~indrm)).^2;
-end
-mu = mean(mean(Pxx(:,baseline,:),2),3);
-ERSP(:,:) = mean(bsxfun(@minus,Pxx, mu),3);
-ERSP_alltrials(:,:,:) = bsxfun(@minus,Pxx, mu);
-freq = freq(sorting);
-ERSP(freq<1,:,:) = [];
-ERSP_alltrials(freq<1,:,:) = [];
-freq(freq<1) = [];
-end
-
-function fig = erspImage(ERSP, condition, times, freq, targetCh)
-% figure;
-% newtimef( squeeze(ERP(ind,:)),EEG_incongruent.pnts,[-500 1000],EEG_incongruent.srate, 0,'plotitc','off','baseline',[-500 0]);
-
-fig = figure('Tag','GoGreen','UserData',['ERSP condition ' condition ', channel ' targetCh '.']);
-indfreq = freq>2 & freq<40;
-imagesc(times,log10(freq(indfreq)),ERSP(indfreq,:));
-% Fix the y-axis tick labels
-ax = gca;
-fval = 10.^ax.YTick;
-Nf = length(ax.YTick);
-yLabel = cell(Nf,1);
-fval(fval >= 10) = round(fval(fval >= 10));
-for it=1:Nf, yLabel{it} = num2str(fval(it),3);end
-mx = prctile((abs(ERSP(:))),95);
-set(gca,'YDir','normal','YTickLabel',yLabel,'CLim',[-mx mx]);
-hold on;
-plot([0 0],ylim,'k-.');
-ylabel('Frequency (Hz)')
-grid on;
-xlabel('Time (ms)')
-title(['ERSP ' targetCh ' ' condition]);
-colorbar;
-cmap = bipolar(256,0.75);
-colormap(cmap);
-end
-
-%
-function Peaklatency = findPeaksLatency(EEG, times, baseline, postStm)
-% EEG = EEG.data;
-if nargin < 3
-    baseline = find(times >-100 & times <= 0);
-end
-if nargin < 4
-    postStm = find(times >=100 & times <= 500);
-end
-mx = [];
-mn = [];
-N = size(EEG,1);
-for ch=1:N
-    mx = [mx findpeaks(EEG(ch,baseline))];
-    [~,loc] = findpeaks(-EEG(ch,baseline));
-    mn = [mn EEG(ch,baseline(loc))];
-end
-th_mn = prctile(mn,5);
-th_mx = prctile(mx,95);
-
-loc_mx = [];
-loc_mn = [];
-for ch=1:N
-    [pk,loc] = findpeaks(EEG(ch,postStm));
-    loc_mx = [loc_mx loc(pk > th_mx)];
-    [~,loc] = findpeaks(-EEG(ch,postStm));
-    pk = EEG(ch,postStm(loc));
-    loc_mn = [loc_mn loc(pk < th_mn)];
-end
-loc_mx = unique(loc_mx);
-loc_mx(diff(loc_mx) < 5) = [];
-loc_mn = unique(loc_mn);
-loc_mn(diff(loc_mn) < 5) = [];
-Peaklatency = postStm(sort([loc_mx loc_mn]));
-end
-
-function fig = erpSourceAnalysis(EEGs, hmfile, condition, Peaklatency, times, nwind)
-    
-hm = headModel.loadFromFile(hmfile);
-n = length(Peaklatency);
-
-for k=1:n
-    ind = Peaklatency(k)+(-5:5);
-    ind(ind>Peaklatency(end)) = [];
-    X(:,k) = mean(abs(mean(EEGs.data(nwind,ind,:),3)),2);
-end
-
-
-cmap = bipolar(256,0.75);
-clim = [0 prctile(X(:),95)];
-fig = figure('Tag','GoGreen', 'UserData',['ERP Source Analysis condition ' condition]);
-fig.Position(3:4) = [1363 356];
-for k=1:n
-    ax = subplot(3,n,k);
-    patch('vertices',hm.cortex.vertices,'Faces',hm.cortex.faces,'FaceVertexCData',X(:,k),...
-        'FaceColor','interp','FaceLighting','phong','LineStyle','none','FaceAlpha',0.3,'SpecularColorReflectance',0,...
-        'SpecularExponent',25,'SpecularStrength',0.25,'Parent',ax);
-    set(ax,'Clim',clim,'XTick',[],'Ytick',[],'Ztick',[],'XColor',[1 1 1],'YColor',[1 1 1], 'ZColor',[1 1 1]);
-    axis(ax, 'vis3d','equal','tight')
-    view([-90 90])
-    if k==1
-        xlabel(ax,'Dorsal');
-        title(ax,'L         R','fontweight','normal','fontsize',9);
-    end
-    if k==n
-        cb = colorbar(ax,'position', [0.9219 0.7093 0.0049 0.2157]);
-        cb.Ticks = cb.Ticks([1 end]);
-        cb.TickLabels = {'0','Max'};
-    end
-    
-    ax = subplot(3,n,k+n);
-    patch('vertices',hm.cortex.vertices,'Faces',hm.cortex.faces,'FaceVertexCData',X(:,k),...
-        'FaceColor','interp','FaceLighting','phong','LineStyle','none','FaceAlpha',0.3,'SpecularColorReflectance',0,...
-        'SpecularExponent',25,'SpecularStrength',0.25,'Parent',ax);
-    set(ax,'Clim',clim,'XTick',[],'Ytick',[],'Ztick',[],'XColor',[1 1 1],'YColor',[1 1 1], 'ZColor',[1 1 1]);
-    axis(ax, 'vis3d','equal','tight')
-    view([0 0])
-    if k==1
-        zlabel(ax,'Lateral');
-        title(ax,'P         A','fontweight','normal','fontsize',9);
-    end
-    
-    ax = subplot(3,n,k+2*n);
-    patch('vertices',hm.cortex.vertices,'Faces',hm.cortex.faces,'FaceVertexCData',X(:,k),...
-        'FaceColor','interp','FaceLighting','phong','LineStyle','none','FaceAlpha',0.3,'SpecularColorReflectance',0,...
-        'SpecularExponent',25,'SpecularStrength',0.25,'Parent',ax);
-    set(ax,'Clim',clim,'XTick',[],'Ytick',[],'Ztick',[],'XColor',[1 1 1],'YColor',[1 1 1], 'ZColor',[1 1 1]);
-    axis(ax, 'vis3d','equal','tight')
-    view(ax,[-90 0]);
-    if k==1
-        zlabel(ax,'Back');
-        title(ax,'L         R','fontweight','normal','fontsize',9);
-    end
-    ylabel(ax,[num2str(times(Peaklatency(k))) ' ms'])
-end
-colormap(cmap(end/2:end,:));
-if n<3
-    fig.Position(3:4) = [428 356];
-end
-end
-
-
-
-function fig = trialStats(EEG, condition, targetCh)
-
-nch = length(targetCh);
-prcTrials = [0.1 0.15 0.25 0.5 0.6 0.7 0.8 0.9 1];
-trialNumber = round(EEG.trials*prcTrials);
-nt = length(trialNumber);
-x = zeros(nt, nch);
-erp = mean(EEG.data,3);
-for ch=1:nch
-    indCh = find(ismember({EEG.chanlocs.labels},targetCh{ch}));
-    for k=1:nt
-        x(k,ch) = corr(erp(indCh,:)',mean(EEG.data(indCh,:,1:trialNumber(k)),3)');
-    end
-end
-
-fig = figure('Tag','GoGreen','UserData',['TrialStats condition ' condition ', channel ' targetCh '.']);
-
-h = plot(prcTrials*100,x,'-.o');
-
-set(h,'color',[0 0.447 0.741]);
-
-xlabel('Fraction of trials (%)')
-
-ylabel('Correlation');
-legend(targetCh,'Location','southeast');
-grid on
-ylim([0.5 1]);
-xlim(prcTrials([1 end])*100)
-end
-
-
-function [trialset] = behavior_events(tabledata)
+function [trialset] = behavior_events(tabledata, rejTrials, EpochTrials)
 
 %load the behavioral data
 % fullFileName1 = fullfile(pathname,behfilename);
-% 
+%
 % tabledata = readtable(fullFileName1);
-
-%find the actual working block
-
-desiredblock = find(tabledata.Block ~= 0);
-actualdata = tabledata(desiredblock,:);
-
-
-%performance events
-perf = actualdata.Accuracy;
-
-perf_inacc = desiredblock(find(perf == 0));
-perf_acc = desiredblock(find(perf == 1));
-
-trialset(1).ind = perf_inacc;
-trialset(1).condition = 'Inaccurate';
-trialset(2).ind = perf_acc;
-trialset(2).condition = 'Accurate';
-
-
-%reaction time events
-rtime = actualdata.ResponseTime;
-
-rtime_fast = desiredblock(find(rtime < median(rtime)));
-rtime_slow = desiredblock(find(rtime > median(rtime)));
-
-
-trialset(3).ind = rtime_fast;
-trialset(3).condition = 'RT fast';
-trialset(4).ind = rtime_slow;
-trialset(4).condition = 'RT slow';
-
-
-%stimulus based events, Match probe and nonMatch probe
-stim = actualdata.Stimulus;
-
-Neutral  = desiredblock(find(stim == 1 | stim == 2));
-Happy = desiredblock(find(stim == 3 | stim == 4));
-Angry  = desiredblock(find(stim == 5 | stim == 6));
-Sad = desiredblock(find(stim == 7 | stim == 8));
-
-Male = desiredblock(find(stim == 1 | stim == 3 | stim == 5 | stim == 7 ));
-Female = desiredblock(find(stim == 2 | stim == 4 | stim == 6 | stim == 8));
-
-trialset(5).ind = Neutral;
-trialset(5).condition = 'Neutral';
-trialset(6).ind = Happy;
-trialset(6).condition = 'Happy';
-trialset(7).ind = Angry;
-trialset(7).condition = 'Angry';
-trialset(8).ind = Sad;
-trialset(8).condition = 'Sad';
-
-trialset(9).ind = Male;
-trialset(9).condition = 'Male';
-trialset(10).ind = Female;
-trialset(10).condition = 'Female';
-
-
-%Stim present in the upper / lower face
-
-Upper = desiredblock(find(stim == 21 | stim == 22));
-Lower = desiredblock(find(stim == 23 | stim == 24));
-
-%left /right
-Left = desiredblock(find(stim == 21 | stim == 23));
-Right = desiredblock(find(stim == 22 | stim == 24));
-
-trialset(11).ind = Upper;
-trialset(11).condition = 'Upper';
-trialset(12).ind = Lower;
-trialset(12).condition = 'Lower';
-trialset(13).ind = Left;
-trialset(13).condition = 'Left';
-trialset(14).ind = Right;
-trialset(14).condition = 'Right';
-
-trialset(end+1).ind = desiredblock;
-trialset(end).condition = 'All Trials';
+try
+    %find the actual working block
+    
+    %Taking away the beh data trials whose EEG has been rejected
+    tabledata = tabledata(EpochTrials,:); %first pooling the trials of interest
+    tabledata(rejTrials,:) = []; %taking out the rejected trials in the pooled set
+    
+    
+    desiredblock = find(tabledata.Block ~= 0);
+    actualdata = tabledata(desiredblock,:);
+    
+    
+    %performance events
+    perf = actualdata.Accuracy;
+    
+    perf_inacc = desiredblock(find(perf == 0));
+    perf_acc = desiredblock(find(perf == 1));
+    
+    trialset(1).ind = perf_inacc;
+    trialset(1).condition = 'Inaccurate';
+    trialset(2).ind = perf_acc;
+    trialset(2).condition = 'Accurate';
+    
+    
+    %reaction time events
+    rtime = actualdata.ResponseTime;
+    
+    rtime_fast = desiredblock(find(rtime < median(rtime)));
+    rtime_slow = desiredblock(find(rtime > median(rtime)));
+    
+    
+    trialset(3).ind = rtime_fast;
+    trialset(3).condition = 'RT fast';
+    trialset(4).ind = rtime_slow;
+    trialset(4).condition = 'RT slow';
+    
+    
+    %stimulus based events, Match probe and nonMatch probe
+    stim = actualdata.Stimulus;
+    
+    Neutral  = desiredblock(find(stim == 1 | stim == 2));
+    Happy = desiredblock(find(stim == 3 | stim == 4));
+    Angry  = desiredblock(find(stim == 5 | stim == 6));
+    Sad = desiredblock(find(stim == 7 | stim == 8));
+    
+    Male = desiredblock(find(stim == 1 | stim == 3 | stim == 5 | stim == 7 ));
+    Female = desiredblock(find(stim == 2 | stim == 4 | stim == 6 | stim == 8));
+    
+    trialset(5).ind = Neutral;
+    trialset(5).condition = 'Neutral';
+    trialset(6).ind = Happy;
+    trialset(6).condition = 'Happy';
+    trialset(7).ind = Angry;
+    trialset(7).condition = 'Angry';
+    trialset(8).ind = Sad;
+    trialset(8).condition = 'Sad';
+    
+    trialset(9).ind = Male;
+    trialset(9).condition = 'Male';
+    trialset(10).ind = Female;
+    trialset(10).condition = 'Female';
+    
+    
+    %Stim present in the upper / lower face
+    
+    Upper = desiredblock(find(stim == 21 | stim == 22));
+    Lower = desiredblock(find(stim == 23 | stim == 24));
+    
+    %left /right
+    Left = desiredblock(find(stim == 21 | stim == 23));
+    Right = desiredblock(find(stim == 22 | stim == 24));
+    
+    trialset(11).ind = Upper;
+    trialset(11).condition = 'Upper';
+    trialset(12).ind = Lower;
+    trialset(12).condition = 'Lower';
+    trialset(13).ind = Left;
+    trialset(13).condition = 'Left';
+    trialset(14).ind = Right;
+    trialset(14).condition = 'Right';
+    
+    trialset(end+1).ind = desiredblock;
+    trialset(end).condition = 'All Trials';
+    
+catch
+    
+    trialsetnow = 1:length(EpochTrials);
+    trialsetnow = trialsetnow(EpochTrials);
+    trialsetnow(rejTrials) = [];
+    trialset.ind = 1:length(trialsetnow);   
+    trialset.condition = 'All Trials';
+end
 
 end
